@@ -1,183 +1,155 @@
-"""Lyric2Poster (open-source edition): chart song -> lyrics -> art brief (Claude) -> poster.
-
-Runs as one Streamlit script, so it deploys to Streamlit Community Cloud straight from GitHub.
-Lyrics live only in this browser session: they are cleared right after the art brief is made,
-and nothing in this file writes them to disk, a log or a database.
-"""
-from __future__ import annotations
-
-import logging
-import random
-
+import io
+import os
 import streamlit as st
+from PIL import Image, ImageDraw, ImageFont
+import qrcode
 
-from lyric2poster.art_director import BriefError, build_art_director
-from lyric2poster.charts import load_charts
-from lyric2poster.config import load_settings
-from lyric2poster.image_engines import EngineError, ImageRequest, build_engine, generate_with_fallback
-from lyric2poster.lyrics import build_provider
-from lyric2poster.limits import SessionLimiter, owner_key_allowed, passcode_ok
-from lyric2poster.overlay import add_title_overlay
-from lyric2poster.prompt_builder import build_image_prompt
-from lyric2poster.safety import InputError, blocked_reason, clean_label, clean_lyrics, needs_softening
-from lyric2poster.schemas import STYLE_PRESETS, ArtBrief
-
-log = logging.getLogger("l2p.app")
-
-st.set_page_config(page_title="Lyric2Poster", page_icon="🎨", layout="centered")
-
-
-def _secrets():
-    try:
-        return st.secrets
-    except Exception:  # noqa: BLE001 - no secrets file when running locally
-        return None
-
-
-settings = load_settings(secrets=_secrets())
-limiter = SessionLimiter(st.session_state, settings.brief_limit, settings.poster_limit)
-
-
-@st.cache_data(ttl=3600, show_spinner=False)
-def _charts(directory: str, url: str) -> list[dict]:
-    return load_charts(directory, url)
-
-
-# ------------------------------------------------------------------ sidebar: keys and limits
-with st.sidebar:
-    st.header("Access")
-    st.caption("Without a key the app runs in demo mode: canned art brief, Pillow-drawn poster.")
-    if settings.app_passcode:
-        code = st.text_input("Class passcode (to use the owner's key)", type="password", key="passcode_input")
-        if code:
-            st.session_state["unlocked"] = passcode_ok(code, settings.app_passcode)
-            if not st.session_state["unlocked"]:
-                st.error("Wrong passcode.")
-    own_claude = st.text_input("Or paste your own Claude API key", type="password", key="byo_claude",
-                               help="Used only for your requests in this session. Never stored.")
-    st.caption(f"Briefs left: {limiter.remaining('briefs')}  |  Posters left: {limiter.remaining('posters')}")
-
-unlocked = bool(st.session_state.get("unlocked"))
-anthropic_key = own_claude.strip() or (settings.anthropic_api_key if owner_key_allowed(settings, unlocked) else "")
-openai_key = settings.openai_api_key if owner_key_allowed(settings, unlocked) else ""
-# A key pasted in the sidebar always means Claude, even when no owner key is configured.
-llm = "claude" if own_claude.strip() else settings.llm
-director = build_art_director(
-    llm if (anthropic_key or openai_key) else "demo",
-    anthropic_api_key=anthropic_key, openai_api_key=openai_key,
-    claude_model=settings.claude_model, openai_model=settings.openai_model,
+# 페이지 기본 설정
+st.set_page_config(
+    page_title="Lyric2Poster Studio",
+    page_icon="🎵",
+    layout="wide"
 )
-engine = build_engine(settings)
 
-st.title("Lyric2Poster")
-st.caption(f"Art director: **{director.name}**  |  Image engine: **{engine.name}**")
+# 사이드바 디자인 설정
+st.sidebar.title("🎵 Lyric2Poster Studio")
+st.sidebar.markdown("감성적인 가사 포스터 제작 및 음악 메타데이터/QR 위젯 생성기")
 
+st.sidebar.divider()
 
-# ------------------------------------------------------------------ step 1: choose a song
-charts = _charts(settings.charts_dir, settings.charts_url)
-chart = st.selectbox("Chart", charts, format_func=lambda c: c.get("label", c["chart_id"]))
-tracks = chart["tracks"]
-labels = [f"{t['rank']}. {t['title']} - {t['artist']}" for t in tracks] + ["Type my own song"]
-choice = st.selectbox("Song", labels)
-if choice == "Type my own song":
-    title = st.text_input("Title", max_chars=120)
-    artist = st.text_input("Artist", max_chars=120)
+# 1. 텍스트 입력 섹션
+st.sidebar.subheader("1. 가사 및 메타데이터 입력")
+lyric_text = st.sidebar.text_area(
+    "가사 내용",
+    value="내맘에 들어와\n너로 가득 채워진 이 순간",
+    height=120
+)
+song_title = st.sidebar.text_input("곡 제목", value="Ditto")
+artist_name = st.sidebar.text_input("아티스트 명", value="NewJeans")
+music_link = st.sidebar.text_input("음악 링크 (YouTube / Spotify)", value="https://www.youtube.com/")
+
+# 2. 디자인 및 위젯 옵션
+st.sidebar.subheader("2. 스타일 & 위젯 설정")
+bg_color_option = st.sidebar.selectbox(
+    "배경 테마",
+    ["다크 시네마틱 (Dark)", "클린 화이트 (Light)", "선셋 그라데이션", "딥 오션"]
+)
+include_metadata_card = st.sidebar.checkbox("🎵 음악 메타데이터 카드 표시", value=True)
+include_qr_code = st.sidebar.checkbox("📱 실시간 스캔 QR 코드 추가", value=True)
+
+# 3. 이미지 생성 버튼
+generate_btn = st.sidebar.button("✨ 포스터 생성하기", type="primary")
+
+# 메인 화면 UI
+st.title("🎨 Lyric2Poster Studio")
+st.markdown("나만의 감성적인 가사 포스터를 만들고, 음악 메타데이터와 QR코드로 인터랙션을 더해보세요.")
+
+# 포스터 렌더링 함수
+def generate_poster(lyric, title, artist, link, bg_theme, show_card, show_qr):
+    # 기본 캔버스 설정 (정사각형 인스타그램 포스터 규격: 1080x1080)
+    width, height = 1080, 1080
+    
+    # 테마별 배경색 설정
+    if bg_theme == "다크 시네마틱 (Dark)":
+        bg_color = (18, 18, 18)
+        text_color = (255, 255, 255)
+        sub_color = (170, 170, 170)
+        card_bg = (30, 30, 30, 200)
+    elif bg_theme == "클린 화이트 (Light)":
+        bg_color = (245, 245, 247)
+        text_color = (30, 30, 30)
+        sub_color = (110, 110, 110)
+        card_bg = (255, 255, 255, 230)
+    elif bg_theme == "선셋 그라데이션":
+        bg_color = (45, 27, 45)
+        text_color = (255, 230, 240)
+        sub_color = (210, 160, 180)
+        card_bg = (60, 35, 60, 200)
+    else:  # 딥 오션
+        bg_color = (15, 25, 45)
+        text_color = (230, 240, 255)
+        sub_color = (150, 180, 210)
+        card_bg = (25, 40, 70, 200)
+
+    # 기본 이미지 생성
+    poster = Image.new("RGB", (width, height), color=bg_color)
+    draw = ImageDraw.Draw(poster)
+
+    # 폰트 로드 (시스템 기본 폰트 대체 혹은 기본 제공 폰트 사용)
+    try:
+        font_large = ImageFont.truetype("DejaVuSans-Bold.ttf", 54)
+        font_medium = ImageFont.truetype("DejaVuSans.ttf", 36)
+        font_small = ImageFont.truetype("DejaVuSans.ttf", 26)
+    except:
+        font_large = ImageFont.load_default()
+        font_medium = ImageFont.load_default()
+        font_small = ImageFont.load_default()
+
+    # 가사 텍스트 중앙 배치
+    lines = lyric.split("\n")
+    total_text_height = len(lines) * 70
+    start_y = (height - total_text_height) // 2 - 100
+
+    for i, line in enumerate(lines):
+        # 텍스트 중앙 정렬을 위한 대략적인 위치 계산
+        draw.text((80, start_y + (i * 70)), line, fill=text_color, font=font_large)
+
+    # 하단 음악 메타데이터 카드 위젯 렌더링
+    if show_card:
+        card_layer = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+        card_draw = ImageDraw.Draw(card_layer)
+        
+        card_x1, card_y1 = 80, 820
+        card_x2, card_y2 = 1000, 1000
+        
+        # 카드 배경 그리기
+        card_draw.rounded_rectangle([card_x1, card_y1, card_x2, card_y2], radius=24, fill=card_bg)
+        
+        # 곡 정보 텍스트
+        card_draw.text((130, 850), f"Now Playing  •  {title}", fill=text_color, font=font_medium)
+        card_draw.text((130, 900), artist, fill=sub_color, font=font_small)
+        
+        # 음악 재생 바 (Progress Bar)
+        card_draw.rounded_rectangle([130, 955, 930, 967], radius=6, fill=(100, 100, 100, 150))
+        card_draw.rounded_rectangle([130, 955, 450, 967], radius=6, fill=text_color)
+        
+        poster = Image.alpha_composite(poster.convert("RGBA"), card_layer).convert("RGB")
+
+    # QR 코드 추가 렌더링
+    if show_qr and link:
+        qr = qrcode.QRCode(box_size=4, border=1)
+        qr.add_data(link)
+        qr.make(fit=True)
+        qr_img = qr.make_image(fill_color="black", back_color="white").convert("RGB")
+        qr_img = qr_img.resize((120, 120))
+        
+        # 포스터 우측 상단 또는 카드 옆에 배치
+        poster.paste(qr_img, (880, 80))
+
+    return poster
+
+# 미리보기 및 다운로드 처리
+if generate_btn:
+    with st.spinner("포스터와 음악 위젯을 생성하고 있습니다..."):
+        result_poster = generate_poster(
+            lyric_text, song_title, artist_name, music_link, 
+            bg_color_option, include_metadata_card, include_qr_code
+        )
+        
+        # 화면에 표시
+        st.image(result_poster, caption="생성된 리릭스 포스터 미리보기", use_container_width=True)
+        
+        # 다운로드 버튼 제공
+        buf = io.BytesIO()
+        result_poster.save(buf, format="PNG")
+        byte_im = buf.getvalue()
+        
+        st.download_button(
+            label="💾 포스터 이미지 다운로드 (PNG)",
+            data=byte_im,
+            file_name="lyric_poster_with_widget.png",
+            mime="image/png"
+        )
 else:
-    picked = tracks[labels.index(choice)]
-    title, artist = picked["title"], picked["artist"]
-title, artist = clean_label(title), clean_label(artist)
-
-
-# ------------------------------------------------------------------ step 2: lyrics -> brief
-def make_brief() -> None:
-    st.session_state["error"] = ""
-    raw = st.session_state.get("lyrics", "")
-    try:
-        lyrics = clean_lyrics(raw, min_chars=20, max_chars=8000)
-    except InputError as exc:
-        st.session_state["error"] = str(exc)
-        return
-    if not title or not artist:
-        st.session_state["error"] = "Please give a title and an artist."
-        return
-    if not limiter.take("briefs"):
-        st.session_state["error"] = "You have used all your briefs for this session."
-        return
-    try:
-        brief = director.brief(title, artist, lyrics)
-    except BriefError as exc:
-        st.session_state["error"] = str(exc)
-        return
-    finally:
-        st.session_state["lyrics"] = ""  # lyrics are never kept after this point
-    st.session_state["brief"] = brief.model_dump()
-    st.session_state.pop("poster", None)
-
-
-def load_lyrics() -> None:
-    """Fill the lyrics box for the chosen song. Runs again only when the song changes."""
-    provider = build_provider(settings.lyrics_provider)
-    st.session_state["_lyrics_for"] = (title, artist)
-    st.session_state["lyrics_note"] = ""
-    if provider is None or not title or not artist:
-        return
-    found = provider.fetch(title, artist)
-    if found:
-        st.session_state["lyrics"] = found
-        st.session_state["lyrics_note"] = f"Lyrics loaded from {provider.name}. You can edit them. They are erased after the brief."
-    else:
-        st.session_state["lyrics_note"] = "No lyrics found for this song. Please paste your own text."
-
-
-if st.session_state.get("_lyrics_for") != (title, artist):
-    load_lyrics()
-
-st.text_area("Lyrics (used once, never saved)", key="lyrics", height=200, max_chars=8000)
-if st.session_state.get("lyrics_note"):
-    st.caption(st.session_state["lyrics_note"])
-st.button("1. Write the art brief", on_click=make_brief, type="primary")
-if settings.lyrics_provider != "off":
-    st.button("Load lyrics again", on_click=load_lyrics)
-if st.session_state.get("error"):
-    st.error(st.session_state["error"])
-
-# ------------------------------------------------------------------ step 3: review and generate
-if "brief" in st.session_state:
-    brief = ArtBrief.model_validate(st.session_state["brief"])
-    reason = blocked_reason(brief)
-    st.subheader("Art brief")
-    st.write(brief.summary)
-    st.caption(f"Mood: {', '.join(brief.mood)}  |  Imagery: {', '.join(brief.imagery)}")
-    st.write("Palette: " + ", ".join(f"`{c}`" for c in brief.palette))
-    if reason:
-        st.warning(reason)
-    else:
-        if needs_softening(brief):
-            st.info("This song touches sensitive themes, so the poster will treat them abstractly.")
-        style = st.selectbox("Style", STYLE_PRESETS, index=STYLE_PRESETS.index(brief.style_preset))
-
-        def make_poster() -> None:
-            if not limiter.take("posters"):
-                st.session_state["error"] = "You have used all your posters for this session."
-                return
-            req = ImageRequest(prompt=build_image_prompt(brief, style), palette=brief.palette,
-                               seed=random.randint(0, 2**31 - 1))
-            try:
-                result, fell_back, note = generate_with_fallback(engine, req)
-            except EngineError as exc:
-                st.session_state["error"] = str(exc)
-                return
-            st.session_state["poster"] = {
-                "png": add_title_overlay(result.png, title, artist),
-                "engine": result.engine, "model": result.model, "fell_back": fell_back, "note": note,
-            }
-
-        st.button("2. Make the poster", on_click=make_poster)
-
-if "poster" in st.session_state:
-    poster = st.session_state["poster"]
-    if poster["fell_back"]:
-        st.warning(f"The image engine failed, so this is the offline demo poster. ({poster['note']})")
-    st.image(poster["png"], caption=f"{poster['engine']} / {poster['model']}")
-    st.download_button("Download PNG", poster["png"], file_name="poster.png", mime="image/png")
-    st.caption("AI-generated image. Title and artist were added as text afterwards.")
+    # 초기 화면 예시 이미지 공간 안내
+    st.info("👈 왼쪽 사이드바에서 가사를 입력하고 **[포스터 생성하기]** 버튼을 눌러주세요!")
