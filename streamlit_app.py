@@ -6,13 +6,13 @@ import qrcode
 
 # 페이지 기본 설정
 st.set_page_config(
-    page_title="Lyric2Poster Studio",
+    page_title="Upgraded Lyric2Poster Studio",
     page_icon="🎵",
     layout="wide"
 )
 
 # 사이드바 디자인 설정
-st.sidebar.title("🎵 Lyric2Poster Studio")
+st.sidebar.title("🎵 Upgraded Lyric2Poster Studio")
 st.sidebar.markdown("감성적인 가사 포스터 제작 및 음악 메타데이터/QR 위젯 생성기")
 
 st.sidebar.divider()
