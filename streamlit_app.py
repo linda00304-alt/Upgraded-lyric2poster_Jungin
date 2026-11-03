@@ -31,10 +31,10 @@ music_link = st.sidebar.text_input("Music Link (YouTube / Spotify)", value="http
 # 2. Style & Background Image upload
 st.sidebar.subheader("2. Style & Background")
 bg_theme = st.sidebar.selectbox(
-    "Color Theme",
-    ["Dark Cinematic", "Sunset Mood", "Deep Ocean", "Warm Beige"]
+    "Poster Mood",
+    ["Midnight Neon", "Sunset Glow", "Dreamy Blue", "Minimal Mono"]
 )
-uploaded_bg = st.sidebar.file_uploader("Upload Custom Background Image (Optional)", type=["png", "jpg", "jpeg"])
+uploaded_bg = st.sidebar.file_uploader("Upload Your Photo (Optional)", type=["png", "jpg", "jpeg"])
 
 include_metadata_card = st.sidebar.checkbox("🎵 Show Music Metadata Card", value=True)
 include_qr_code = st.sidebar.checkbox("📱 Add Scannable QR Code", value=True)
@@ -50,42 +50,52 @@ st.markdown("Create your own emotional lyric poster and add music metadata and Q
 def generate_poster(lyric, title, artist, link, theme, custom_bg, show_card, show_qr):
     width, height = 1080, 1080
     
-    # 1. Background Setup
+    poster = Image.new("RGB", (width, height))
+    draw_bg = ImageDraw.Draw(poster)
+    
+    # 1. Background Setup with guaranteed Rich Gradients
     if custom_bg is not None:
-        # User uploaded a custom background image
         bg_img = Image.open(custom_bg).convert("RGBA")
         poster = ImageOps.fit(bg_img, (width, height), method=Image.Resampling.LANCZOS)
-        # Add a dark overlay to make text readable
-        overlay = Image.new("RGBA", (width, height), (0, 0, 0, 100))
+        overlay = Image.new("RGBA", (width, height), (0, 0, 0, 120))
         poster = Image.alpha_composite(poster, overlay).convert("RGB")
+        draw_bg = ImageDraw.Draw(poster)
+        text_color = (255, 255, 255)
+        sub_color = (200, 200, 200)
+        card_bg = (30, 30, 35, 220)
     else:
-        # Preset themes with gradient/mood styling
-        if theme == "Dark Cinematic":
-            bg_color = (20, 20, 24)
+        # Define exact gradient colors based on theme
+        if theme == "Midnight Neon":
+            c1, c2 = (35, 25, 55), (10, 10, 18)
             text_color = (255, 255, 255)
-            sub_color = (170, 170, 170)
-            card_bg = (35, 35, 42, 210)
-        elif theme == "Sunset Mood":
-            bg_color = (55, 30, 45)
+            sub_color = (190, 160, 220)
+            card_bg = (45, 35, 65, 230)
+        elif theme == "Sunset Glow":
+            c1, c2 = (90, 35, 55), (35, 20, 40)
             text_color = (255, 235, 245)
-            sub_color = (220, 170, 190)
-            card_bg = (70, 40, 60, 210)
-        elif theme == "Deep Ocean":
-            bg_color = (15, 30, 55)
-            text_color = (235, 245, 255)
-            sub_color = (160, 190, 220)
-            card_bg = (25, 45, 75, 210)
-        else:  # Warm Beige
-            bg_color = (245, 240, 235)
-            text_color = (40, 40, 40)
-            sub_color = (120, 115, 110)
-            card_bg = (255, 255, 255, 230)
+            sub_color = (240, 180, 200)
+            card_bg = (95, 45, 65, 230)
+        elif theme == "Dreamy Blue":
+            c1, c2 = (25, 55, 95), (10, 20, 40)
+            text_color = (230, 245, 255)
+            sub_color = (150, 200, 240)
+            card_bg = (35, 65, 105, 230)
+        else:  # Minimal Mono
+            c1, c2 = (245, 245, 247), (215, 215, 220)
+            text_color = (20, 20, 20)
+            sub_color = (110, 110, 115)
+            card_bg = (255, 255, 255, 240)
 
-        poster = Image.new("RGB", (width, height), color=bg_color)
-        
-        # Add a subtle decorative graphic line or frame to avoid "plain" look
-        draw_dec = ImageDraw.Draw(poster)
-        draw_dec.rectangle([50, 50, width-50, height-50], outline=sub_color, width=2)
+        # Draw smooth vertical gradient line by line
+        for y in range(height):
+            r = int(c1[0] + (c2[0] - c1[0]) * (y / height))
+            g = int(c1[1] + (c2[1] - c1[1]) * (y / height))
+            b = int(c1[2] + (c2[2] - c1[2]) * (y / height))
+            draw_bg.line([(0, y), (width, y)], fill=(r, g, b))
+
+        # Artistic double frame lines
+        draw_bg.rectangle([60, 60, width-60, height-60], outline=sub_color, width=2)
+        draw_bg.rectangle([72, 72, width-72, height-72], outline=sub_color, width=1)
 
     draw = ImageDraw.Draw(poster)
 
@@ -113,7 +123,7 @@ def generate_poster(lyric, title, artist, link, theme, custom_bg, show_card, sho
     lines = lyric.split("\n")
     line_height = 75
     total_text_height = len(lines) * line_height
-    start_y = (height - total_text_height) // 2 - 60
+    start_y = (height - total_text_height) // 2 - 40
 
     for i, line in enumerate(lines):
         draw.text((120, start_y + (i * line_height)), line, fill=text_color, font=font_large)
@@ -123,17 +133,17 @@ def generate_poster(lyric, title, artist, link, theme, custom_bg, show_card, sho
         card_layer = Image.new("RGBA", (width, height), (0, 0, 0, 0))
         card_draw = ImageDraw.Draw(card_layer)
         
-        card_x1, card_y1 = 100, 800
-        card_x2, card_y2 = 980, 980
+        card_x1, card_y1 = 100, 780
+        card_x2, card_y2 = 980, 960
         
         card_draw.rounded_rectangle([card_x1, card_y1, card_x2, card_y2], radius=24, fill=card_bg)
         
-        card_draw.text((150, 835), f"Now Playing  •  {title}", fill=text_color, font=font_medium)
-        card_draw.text((150, 895), artist, fill=sub_color, font=font_small)
+        card_draw.text((150, 815), f"Now Playing  •  {title}", fill=text_color, font=font_medium)
+        card_draw.text((150, 875), artist, fill=sub_color, font=font_small)
         
         # Progress bar
-        card_draw.rounded_rectangle([150, 945, 930, 957], radius=6, fill=(120, 120, 120, 150))
-        card_draw.rounded_rectangle([150, 945, 480, 957], radius=6, fill=text_color)
+        card_draw.rounded_rectangle([150, 925, 930, 937], radius=6, fill=(150, 150, 150, 150))
+        card_draw.rounded_rectangle([150, 925, 480, 937], radius=6, fill=text_color)
         
         poster = Image.alpha_composite(poster.convert("RGBA"), card_layer).convert("RGB")
 
