@@ -120,25 +120,29 @@ def generate_poster(lyric, title, artist, link, bg_theme, show_card, show_qr):
 
     return poster
 
-# Preview and download handler
+# Session state initialization to keep the generated image on screen
+if "poster_image" not in st.session_state:
+    st.session_state.poster_image = None
+
 if generate_btn:
-    with st.spinner("Generating poster and music widget..."):
-        result_poster = generate_poster(
-            lyric_text, song_title, artist_name, music_link, 
-            bg_color_option, include_metadata_card, include_qr_code
-        )
-        
-        st.image(result_poster, caption="Generated Lyric Poster Preview", use_container_width=True)
-        
-        buf = io.BytesIO()
-        result_poster.save(buf, format="PNG")
-        byte_im = buf.getvalue()
-        
-        st.download_button(
-            label="💾 Download Poster Image (PNG)",
-            data=byte_im,
-            file_name="lyric_poster_with_widget.png",
-            mime="image/png"
-        )
+    st.session_state.poster_image = generate_poster(
+        lyric_text, song_title, artist_name, music_link, 
+        bg_color_option, include_metadata_card, include_qr_code
+    )
+
+# Display preview and download button if poster exists
+if st.session_state.poster_image is not None:
+    st.image(st.session_state.poster_image, caption="Generated Lyric Poster Preview", use_container_width=True)
+    
+    buf = io.BytesIO()
+    st.session_state.poster_image.save(buf, format="PNG")
+    byte_im = buf.getvalue()
+    
+    st.download_button(
+        label="💾 Download Poster Image (PNG)",
+        data=byte_im,
+        file_name="lyric_poster_with_widget.png",
+        mime="image/png"
+    )
 else:
     st.info("👈 Please enter your lyrics in the sidebar and click **[Generate Poster]**!")
