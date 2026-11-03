@@ -8,3 +8,8 @@ transformers
 accelerate
 sentencepiece
 protobuf
+streamlit
+Pillow
+qrcode[pil]
+matplotlib
+numpy
